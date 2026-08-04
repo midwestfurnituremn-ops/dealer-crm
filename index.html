@@ -80,6 +80,12 @@ button.small-action{font-size:12px;padding:6px 10px}
 .unmatched-col h3{font-size:13px;margin:0 0 6px;color:var(--text-secondary)}
 .unmatched-item{display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0;border-bottom:0.5px solid var(--border)}
 .count{font-size:12px;color:var(--text-muted);margin-left:6px}
+.add-account-panel{background:var(--card);border:0.5px solid var(--border-strong);border-radius:12px;padding:14px 16px;margin-bottom:16px}
+.add-account-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:8px}
+.add-account-panel input[type=text]{width:100%;min-width:0}
+.add-account-panel textarea{min-height:50px;margin-bottom:8px}
+.add-account-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.na-error{color:var(--danger);font-size:12px}
 </style>
 </head>
 <body>
@@ -104,6 +110,22 @@ button.small-action{font-size:12px;padding:6px 10px}
   <div class="chip" data-f="decline">Decline</div>
   <div class="chip" data-f="review">Needs review</div>
   <div class="chip" data-f="chains">Chains only</div>
+  <button class="linkbtn" id="add-account-btn" style="margin-left:auto">+ Add new account</button>
+</div>
+
+<div class="add-account-panel" id="add-account-panel" style="display:none">
+  <div class="add-account-grid">
+    <input type="text" id="na-name" placeholder="Account name *">
+    <input type="text" id="na-loc" placeholder="City, State">
+    <input type="text" id="na-buyer" placeholder="Buyer / contact">
+    <input type="text" id="na-potential" placeholder="Potential (optional)">
+  </div>
+  <textarea id="na-notes" placeholder="Notes (optional)"></textarea>
+  <div class="add-account-actions">
+    <button class="small-action" id="na-save">Save account</button>
+    <button class="linkbtn" id="na-cancel">Cancel</button>
+    <span class="na-error" id="na-error"></span>
+  </div>
 </div>
 
 <div id="cards"></div>
@@ -124,7 +146,16 @@ const API = "/api/state";
 
 let REVIEWS = {};
 let LIVE_EDITS = {};
+let CUSTOM_ACCOUNTS = [];
 try { REVIEWS = JSON.parse(localStorage.getItem('dealerCRM_reviews') || '{}'); } catch(e) { REVIEWS = {}; }
+
+function allAccounts(){
+  const custom = CUSTOM_ACCOUNTS.map(c=>({
+    n: c.n, loc: c.loc||'', buyer: c.buyer||'', potential: c.potential||'',
+    sales: {}, visit: null, custom: true, customId: c.id
+  }));
+  return DATA.concat(custom);
+}
 
 function todayISO(){
   const mm = String(TODAY_M+1).padStart(2,'0');
@@ -140,6 +171,7 @@ async function loadLiveState(){
     const j = await res.json();
     REVIEWS = j.reviews || {};
     LIVE_EDITS = j.edits || {};
+    CUSTOM_ACCOUNTS = j.customAccounts || [];
     localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS));
     el.textContent = 'Synced — changes save automatically across your devices.';
     el.className = 'sync-status ok';
@@ -157,6 +189,7 @@ async function postState(body){
     if(res.ok){
       REVIEWS = j.reviews || REVIEWS;
       LIVE_EDITS = j.edits || LIVE_EDITS;
+      CUSTOM_ACCOUNTS = j.customAccounts || CUSTOM_ACCOUNTS;
       localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS));
     }
   }catch(e){ /* offline - local view already updated optimistically */ }
@@ -263,7 +296,8 @@ let shownCount = 50;
 function render(){
   const q = document.getElementById('search').value.toLowerCase();
   const f = document.querySelector('.chip.active').dataset.f;
-  let filtered = DATA.filter(a=>{
+  const ALL = allAccounts();
+  let filtered = ALL.filter(a=>{
     if(!q) return true;
     return (a.n||'').toLowerCase().includes(q) || (a.loc||'').toLowerCase().includes(q) || (a.buyer||'').toLowerCase().includes(q);
   });
@@ -277,10 +311,10 @@ function render(){
   }
   filtered.sort((a,b)=>accountTotal(b)-accountTotal(a));
 
-  document.getElementById('m-total').textContent = DATA.length.toLocaleString();
-  document.getElementById('m-sales').textContent = DATA.filter(a=>Object.keys(a.sales).length>0).length.toLocaleString();
-  document.getElementById('m-visit').textContent = DATA.filter(a=>Object.keys(a.sales).length>0 && visitStatus(a).mo>=18).length.toLocaleString();
-  document.getElementById('m-review').textContent = DATA.filter(a=>hasReview(a)).length.toLocaleString();
+  document.getElementById('m-total').textContent = ALL.length.toLocaleString();
+  document.getElementById('m-sales').textContent = ALL.filter(a=>Object.keys(a.sales).length>0).length.toLocaleString();
+  document.getElementById('m-visit').textContent = ALL.filter(a=>Object.keys(a.sales).length>0 && visitStatus(a).mo>=18).length.toLocaleString();
+  document.getElementById('m-review').textContent = ALL.filter(a=>hasReview(a)).length.toLocaleString();
 
   const el = document.getElementById('cards');
   el.innerHTML='';
@@ -296,14 +330,17 @@ function render(){
     const hasKids = a.c && a.kids && a.kids.length>0;
     card.innerHTML = `
       <div class="card-top">
-        <div class="acct-name">${a.n}${a.c?' <span class="count">chain</span>':''}</div>
+        <div class="acct-name">${a.n}${a.c?' <span class="count">chain</span>':''}${a.custom?' <span class="count">added manually</span>':''}</div>
         <div class="acct-total">${total>0?fmt(total):'&mdash;'} <span class="u">YTD</span></div>
       </div>
       <div class="meta">${a.loc||''}${a.buyer?' &middot; '+a.buyer:''}${hasKids?' &middot; '+a.kids.length+' locations':''}</div>
       <div class="badges">${salesBadges(a) || '<span style="color:var(--text-muted);font-size:12px">No matched sales</span>'}</div>
       <div class="footer-row">
         <span class="${v.cls}">${v.text}</span>
-        ${a.potential?`<span style="color:var(--text-secondary)">Potential: ${a.potential}</span>`:''}
+        <span>
+          ${a.potential?`<span style="color:var(--text-secondary)">Potential: ${a.potential}</span>`:''}
+          ${a.custom?`<button class="mini-btn js-delete-account" style="color:var(--danger);margin-left:8px">remove account</button>`:''}
+        </span>
       </div>
       ${hasKids?`<div class="chain-toggle js-chain-toggle">&#9656; show ${a.kids.length} locations</div><div class="children">${a.kids.map(k=>{
         const kv = statusFromDate(k.visit);
@@ -340,7 +377,7 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
   const card = ev.target.closest('.card');
   if(!card) return;
   const account = card.dataset.account;
-  const a = DATA.find(x=>x.n===account);
+  const a = allAccounts().find(x=>x.n===account);
 
   if(ev.target.closest('.js-chain-toggle')){
     const toggle = card.querySelector('.js-chain-toggle');
@@ -406,6 +443,50 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
     postState({action:'deleteVisit', account, index});
     return;
   }
+  if(ev.target.closest('.js-delete-account')){
+    if(!confirm(`Remove "${account}" from the dashboard? This cannot be undone.`)) return;
+    CUSTOM_ACCOUNTS = CUSTOM_ACCOUNTS.filter(c=>c.id!==a.customId);
+    postState({action:'deleteAccount', id: a.customId});
+    return;
+  }
+});
+
+document.getElementById('add-account-btn').addEventListener('click', ()=>{
+  const panel = document.getElementById('add-account-panel');
+  panel.style.display = panel.style.display==='none' ? 'block' : 'none';
+});
+document.getElementById('na-cancel').addEventListener('click', ()=>{
+  document.getElementById('add-account-panel').style.display='none';
+  document.getElementById('na-error').textContent='';
+});
+document.getElementById('na-save').addEventListener('click', async ()=>{
+  const nameEl = document.getElementById('na-name');
+  const errEl = document.getElementById('na-error');
+  const name = nameEl.value.trim();
+  if(!name){ errEl.textContent='Account name is required'; return; }
+  const loc = document.getElementById('na-loc').value.trim();
+  const buyer = document.getElementById('na-buyer').value.trim();
+  const potential = document.getElementById('na-potential').value.trim();
+  const notes = document.getElementById('na-notes').value.trim();
+  errEl.textContent='';
+  try{
+    const res = await fetch(API, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action:'addAccount', name, loc, buyer, potential, notes})});
+    const j = await res.json();
+    if(!res.ok){ errEl.textContent = j.error || 'Could not save account'; return; }
+    REVIEWS = j.reviews || REVIEWS;
+    LIVE_EDITS = j.edits || LIVE_EDITS;
+    CUSTOM_ACCOUNTS = j.customAccounts || CUSTOM_ACCOUNTS;
+    localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS));
+    nameEl.value=''; document.getElementById('na-loc').value='';
+    document.getElementById('na-buyer').value=''; document.getElementById('na-potential').value='';
+    document.getElementById('na-notes').value='';
+    document.getElementById('add-account-panel').style.display='none';
+    document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
+    document.querySelector('.chip[data-f="all"]').classList.add('active');
+    document.getElementById('search').value = name;
+    shownCount = 50;
+    render();
+  }catch(e){ errEl.textContent = 'Network error — try again'; }
 });
 
 document.querySelectorAll('.chip').forEach(b=>b.addEventListener('click',()=>{
