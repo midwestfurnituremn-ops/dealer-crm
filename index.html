@@ -55,9 +55,15 @@ input[type=text]{flex:1;min-width:200px}
 .chain-toggle{font-size:11.5px;color:var(--accent);margin-top:6px;cursor:pointer;user-select:none}
 .children{margin-top:8px;padding-top:8px;border-top:0.5px dashed var(--border);display:none}
 .children.open{display:block}
-.child-row{padding:6px 0;border-bottom:0.5px solid var(--border);font-size:12.5px}
+.child-row{padding:8px 0;border-bottom:0.5px solid var(--border);font-size:12.5px}
 .child-row:last-child{border-bottom:none}
 .child-name{font-weight:500}
+.edit-details-form{display:none;margin:6px 0 8px;padding:10px;background:var(--bg);border:0.5px solid var(--border);border-radius:8px}
+.edit-details-form.open{display:block}
+.edit-details-form input[type=text]{width:100%;min-width:0}
+.child-visit{margin-top:4px}
+.child-row .visit-item{font-size:12px}
+.child-row .add-visit-form{margin-bottom:4px}
 .notes-block{margin-top:8px;padding-top:8px;border-top:0.5px solid var(--border);font-size:12.5px}
 .notes-label,.visit-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.02em;margin-bottom:3px}
 .notes-text{color:var(--text-secondary);white-space:pre-wrap}
@@ -158,42 +164,87 @@ function allAccounts(){
 }
 
 function todayISO(){
-  const mm = String(TODAY_M+1).padStart(2,'0');
-  const dd = String(TODAY_D).padStart(2,'0');
-  return `${TODAY_Y}-${mm}-${dd}`;
+  const d = new Date();
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+function setSync(msg, cls){
+  const el = document.getElementById('sync-status');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'sync-status ' + cls;
+}
+
+// Calls the backend with a timeout and one automatic retry.
+// Returns {ok, data, error} — never throws.
+async function apiFetch(opts, tries){
+  tries = tries || 2;
+  let lastErr = null;
+  for(let attempt=0; attempt<tries; attempt++){
+    try{
+      const ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(()=>ctrl.abort(), 15000) : null;
+      let res, txt;
+      try{
+        const o = Object.assign({}, opts);
+        if(ctrl) o.signal = ctrl.signal;
+        res = await fetch(API, o);
+        txt = await res.text();
+      } finally {
+        if(timer) clearTimeout(timer);
+      }
+      let data = null;
+      if(txt){
+        try{ data = JSON.parse(txt); }
+        catch(e){ throw new Error('unexpected response from the server'); }
+      }
+      if(!res.ok){
+        return {ok:false, status:res.status, error:(data && data.error) || ('server error '+res.status), data:data};
+      }
+      return {ok:true, data:data};
+    }catch(e){
+      lastErr = e;
+      if(attempt < tries-1) await new Promise(r=>setTimeout(r, 800));
+    }
+  }
+  const timedOut = lastErr && (lastErr.name === 'AbortError');
+  return {ok:false, network:true, error: timedOut ? 'the connection timed out' : 'could not reach the server'};
+}
+
+function applyState(d){
+  if(!d) return;
+  REVIEWS = d.reviews || REVIEWS;
+  LIVE_EDITS = d.edits || LIVE_EDITS;
+  CUSTOM_ACCOUNTS = d.customAccounts || CUSTOM_ACCOUNTS;
+  try{ localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS)); }catch(e){}
 }
 
 async function loadLiveState(){
-  const el = document.getElementById('sync-status');
-  try{
-    const res = await fetch(API);
-    if(!res.ok) throw new Error('bad status');
-    const j = await res.json();
-    REVIEWS = j.reviews || {};
-    LIVE_EDITS = j.edits || {};
-    CUSTOM_ACCOUNTS = j.customAccounts || [];
-    localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS));
-    el.textContent = 'Synced — changes save automatically across your devices.';
-    el.className = 'sync-status ok';
-  }catch(e){
-    el.textContent = 'Could not reach the live backend — showing your last synced copy. Changes will not save until this reloads successfully.';
-    el.className = 'sync-status err';
+  const r = await apiFetch({}, 2);
+  if(r.ok){
+    REVIEWS = (r.data && r.data.reviews) || {};
+    LIVE_EDITS = (r.data && r.data.edits) || {};
+    CUSTOM_ACCOUNTS = (r.data && r.data.customAccounts) || [];
+    try{ localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS)); }catch(e){}
+    setSync('Synced — changes save automatically across your devices.', 'ok');
+  }else{
+    setSync('Could not reach the live backend ('+r.error+') — showing your last synced copy. Changes will NOT save until this clears. Reload the page to retry.', 'err');
   }
   render();
 }
 
 async function postState(body){
-  try{
-    const res = await fetch(API, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
-    const j = await res.json();
-    if(res.ok){
-      REVIEWS = j.reviews || REVIEWS;
-      LIVE_EDITS = j.edits || LIVE_EDITS;
-      CUSTOM_ACCOUNTS = j.customAccounts || CUSTOM_ACCOUNTS;
-      localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS));
-    }
-  }catch(e){ /* offline - local view already updated optimistically */ }
+  const r = await apiFetch({method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
+  if(r.ok){
+    applyState(r.data);
+    setSync('Synced — changes save automatically across your devices.', 'ok');
+  }else{
+    setSync('That last change did NOT save — '+r.error+'. What you see on screen is not stored yet. Reload the page to see what is actually saved, then re-enter it.', 'err');
+  }
   render();
+  return r;
 }
 
 function fmt(n){ return "$"+Math.round(n).toLocaleString(); }
@@ -201,14 +252,32 @@ function pctChange(ytd, ly){
   if(!ly || ly===0) return null;
   return Math.round(((ytd-ly)/Math.abs(ly))*100);
 }
-function parseDate(dateStr){ return new Date(dateStr); }
+function parseDate(dateStr){
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dateStr||''));
+  if(m) return new Date(+m[1], +m[2]-1, +m[3]);
+  return new Date(dateStr);
+}
 function monthsSince(dateStr){
   if(!dateStr) return null;
   const d = parseDate(dateStr);
-  const now = new Date(TODAY_Y, TODAY_M, TODAY_D);
+  const now = new Date();
   return (now.getFullYear()-d.getFullYear())*12 + (now.getMonth()-d.getMonth());
 }
+function attrEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
+function childKey(parentName, lbl){ return parentName + ' ▸ ' + lbl; }
+function visitsForKey(key){ return (LIVE_EDITS[key] && LIVE_EDITS[key].visits) || []; }
+function maxDate(baseDate, visits){
+  const all = [baseDate, ...visits.map(v=>v.date)].filter(Boolean);
+  if(!all.length) return null;
+  return all.reduce((m,d)=> d>m?d:m);
+}
 function liveEdit(a){ return LIVE_EDITS[a.n] || {}; }
+function liveFields(a){ return liveEdit(a).fields || null; }
+function pick(f, key, fallback){ return (f && f[key]!==undefined && f[key]!==null) ? f[key] : (fallback || ''); }
+function dispName(a){ const f=liveFields(a); return pick(f,'n',a.n) || a.n; }
+function dispLoc(a){ return pick(liveFields(a),'loc',a.loc); }
+function dispBuyer(a){ return pick(liveFields(a),'buyer',a.buyer); }
+function dispPotential(a){ return pick(liveFields(a),'potential',a.potential); }
 function liveNotesText(a){ const e = liveEdit(a); return (e.notes!==undefined && e.notes!==null) ? e.notes : (a.notes || ''); }
 function liveVisits(a){ return liveEdit(a).visits || []; }
 function effectiveLastVisit(a){
@@ -293,13 +362,15 @@ function renderVisitList(visits){
 }
 
 let shownCount = 50;
+const OPEN_CHAINS = new Set();
 function render(){
   const q = document.getElementById('search').value.toLowerCase();
   const f = document.querySelector('.chip.active').dataset.f;
   const ALL = allAccounts();
   let filtered = ALL.filter(a=>{
     if(!q) return true;
-    return (a.n||'').toLowerCase().includes(q) || (a.loc||'').toLowerCase().includes(q) || (a.buyer||'').toLowerCase().includes(q);
+    const hay = [a.n, a.loc, a.buyer, dispName(a), dispLoc(a), dispBuyer(a)].join(' ').toLowerCase();
+    return hay.includes(q);
   });
   if(f!=='all') {
     if(f==='active') filtered = filtered.filter(a=>Object.keys(a.sales).length>0);
@@ -324,27 +395,59 @@ function render(){
     const v = visitStatus(a);
     const notesText = liveNotesText(a);
     const visits = liveVisits(a);
+    const dName = dispName(a), dLoc = dispLoc(a), dBuyer = dispBuyer(a), dPot = dispPotential(a);
+    const isEdited = !!liveFields(a);
     const card = document.createElement('div');
     card.className='card';
     card.dataset.account = a.n;
     const hasKids = a.c && a.kids && a.kids.length>0;
     card.innerHTML = `
       <div class="card-top">
-        <div class="acct-name">${a.n}${a.c?' <span class="count">chain</span>':''}${a.custom?' <span class="count">added manually</span>':''}</div>
+        <div class="acct-name">${dName}${a.c?' <span class="count">chain</span>':''}${a.custom?' <span class="count">added manually</span>':''}${isEdited?' <span class="count">edited</span>':''}</div>
         <div class="acct-total">${total>0?fmt(total):'&mdash;'} <span class="u">YTD</span></div>
       </div>
-      <div class="meta">${a.loc||''}${a.buyer?' &middot; '+a.buyer:''}${hasKids?' &middot; '+a.kids.length+' locations':''}</div>
+      <div class="meta">${dLoc||''}${dBuyer?' &middot; '+dBuyer:''}${hasKids?' &middot; '+a.kids.length+' locations':''}</div>
+      <div class="edit-details-form">
+        <div class="add-account-grid">
+          <input type="text" class="js-ed-name" value="${attrEsc(dName)}" placeholder="Account name *">
+          <input type="text" class="js-ed-loc" value="${attrEsc(dLoc)}" placeholder="City, State">
+          <input type="text" class="js-ed-buyer" value="${attrEsc(dBuyer)}" placeholder="Buyer / contact">
+          <input type="text" class="js-ed-potential" value="${attrEsc(dPot)}" placeholder="Potential">
+        </div>
+        <div class="add-account-actions">
+          <button class="small-action js-ed-save">Save changes</button>
+          <button class="linkbtn js-ed-cancel">Cancel</button>
+          ${isEdited?'<button class="mini-btn js-ed-reset">reset to original</button>':''}
+          <span class="na-error js-ed-error"></span>
+        </div>
+      </div>
       <div class="badges">${salesBadges(a) || '<span style="color:var(--text-muted);font-size:12px">No matched sales</span>'}</div>
       <div class="footer-row">
         <span class="${v.cls}">${v.text}</span>
         <span>
-          ${a.potential?`<span style="color:var(--text-secondary)">Potential: ${a.potential}</span>`:''}
+          ${dPot?`<span style="color:var(--text-secondary)">Potential: ${dPot}</span>`:''}
+          <button class="mini-btn js-edit-details" style="margin-left:8px">edit details</button>
           ${a.custom?`<button class="mini-btn js-delete-account" style="color:var(--danger);margin-left:8px">remove account</button>`:''}
         </span>
       </div>
-      ${hasKids?`<div class="chain-toggle js-chain-toggle">&#9656; show ${a.kids.length} locations</div><div class="children">${a.kids.map(k=>{
-        const kv = statusFromDate(k.visit);
-        return `<div class="child-row"><div class="child-name">${k.lbl}</div><div class="${kv.cls}">${kv.text}</div>${k.buyer?`<div style="color:var(--text-secondary)">${k.buyer}</div>`:''}${k.notes?`<div style="color:var(--text-secondary)">${k.notes}</div>`:''}</div>`;
+      ${hasKids?`<div class="chain-toggle js-chain-toggle">${OPEN_CHAINS.has(a.n)?'&#9662; hide ':'&#9656; show '}${a.kids.length} locations</div><div class="children${OPEN_CHAINS.has(a.n)?' open':''}">${a.kids.map(k=>{
+        const ckey = childKey(a.n, k.lbl);
+        const cvisits = visitsForKey(ckey);
+        const kv = statusFromDate(maxDate(k.visit, cvisits));
+        return `<div class="child-row" data-childkey="${attrEsc(ckey)}">
+          <div class="child-name">${k.lbl}</div>
+          <div class="${kv.cls}">${kv.text}</div>
+          ${k.buyer?`<div style="color:var(--text-secondary)">${k.buyer}</div>`:''}
+          ${k.notes?`<div style="color:var(--text-secondary)">${k.notes}</div>`:''}
+          ${cvisits.length?`<div class="child-visit">${renderVisitList(cvisits)}</div>`:''}
+          <button class="mini-btn js-show-add-visit" style="margin-top:4px">+ log a visit here</button>
+          <div class="add-visit-form">
+            <input type="date" class="js-visit-date" value="${todayISO()}">
+            <input type="text" class="js-visit-who" placeholder="Who">
+            <input type="text" class="js-visit-note" placeholder="Note (optional)">
+            <button class="small-action js-save-visit">Save</button>
+          </div>
+        </div>`;
       }).join('')}</div>`:''}
       <div class="notes-block">
         <div class="notes-label">Notes</div>
@@ -357,7 +460,7 @@ function render(){
         <button class="mini-btn js-cancel-notes" style="display:none">cancel</button>
       </div>
       <div class="visit-block">
-        <div class="visit-label">Visit log</div>
+        <div class="visit-label">${a.c?'Chain / corporate visit log':'Visit log'}</div>
         <div class="js-visit-list">${renderVisitList(visits)}</div>
         <button class="mini-btn js-show-add-visit" style="margin-top:4px">+ log a visit</button>
         <div class="add-visit-form">
@@ -380,11 +483,8 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
   const a = allAccounts().find(x=>x.n===account);
 
   if(ev.target.closest('.js-chain-toggle')){
-    const toggle = card.querySelector('.js-chain-toggle');
-    const kidsEl = card.querySelector('.children');
-    kidsEl.classList.toggle('open');
-    const n = a.kids.length;
-    toggle.innerHTML = (kidsEl.classList.contains('open')?'&#9662; hide ':'&#9656; show ')+n+' locations';
+    if(OPEN_CHAINS.has(account)) OPEN_CHAINS.delete(account); else OPEN_CHAINS.add(account);
+    render();
     return;
   }
 
@@ -397,6 +497,36 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
     const value = acceptBtn ? 'accept' : rejectBtn ? 'reject' : null;
     if(value===null) delete REVIEWS[key]; else REVIEWS[key]=value;
     postState({action:'setReview', key, value});
+    return;
+  }
+
+  if(ev.target.closest('.js-edit-details')){
+    card.querySelector('.edit-details-form').classList.add('open');
+    card.querySelector('.js-ed-name').focus();
+    return;
+  }
+  if(ev.target.closest('.js-ed-cancel')){
+    render();
+    return;
+  }
+  if(ev.target.closest('.js-ed-save')){
+    const form = card.querySelector('.edit-details-form');
+    const name = form.querySelector('.js-ed-name').value.trim();
+    if(!name){ form.querySelector('.js-ed-error').textContent = 'Account name cannot be blank'; return; }
+    const fields = {
+      n: name,
+      loc: form.querySelector('.js-ed-loc').value.trim(),
+      buyer: form.querySelector('.js-ed-buyer').value.trim(),
+      potential: form.querySelector('.js-ed-potential').value.trim()
+    };
+    LIVE_EDITS[account] = LIVE_EDITS[account] || {};
+    LIVE_EDITS[account].fields = fields;
+    postState({action:'setFields', account, fields});
+    return;
+  }
+  if(ev.target.closest('.js-ed-reset')){
+    if(LIVE_EDITS[account]) delete LIVE_EDITS[account].fields;
+    postState({action:'setFields', account, fields:null});
     return;
   }
 
@@ -422,25 +552,32 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
   }
 
   if(ev.target.closest('.js-show-add-visit')){
-    card.querySelector('.add-visit-form').classList.add('open');
+    const childRow = ev.target.closest('.child-row');
+    const scope = childRow || card.querySelector('.visit-block');
+    scope.querySelector('.add-visit-form').classList.add('open');
     ev.target.closest('.js-show-add-visit').style.display='none';
     return;
   }
   if(ev.target.closest('.js-save-visit')){
-    const date = card.querySelector('.js-visit-date').value || todayISO();
-    const who = card.querySelector('.js-visit-who').value;
-    const note = card.querySelector('.js-visit-note').value;
-    LIVE_EDITS[account] = LIVE_EDITS[account] || {};
-    LIVE_EDITS[account].visits = LIVE_EDITS[account].visits || [];
-    LIVE_EDITS[account].visits.unshift({date, who, note});
-    postState({action:'addVisit', account, date, who, note});
+    const childRow = ev.target.closest('.child-row');
+    const scope = childRow || card.querySelector('.visit-block');
+    const key = childRow ? childRow.dataset.childkey : account;
+    const date = scope.querySelector('.js-visit-date').value || todayISO();
+    const who = scope.querySelector('.js-visit-who').value;
+    const note = scope.querySelector('.js-visit-note').value;
+    LIVE_EDITS[key] = LIVE_EDITS[key] || {};
+    LIVE_EDITS[key].visits = LIVE_EDITS[key].visits || [];
+    LIVE_EDITS[key].visits.unshift({date, who, note});
+    postState({action:'addVisit', account:key, date, who, note});
     return;
   }
   if(ev.target.closest('.js-del-visit')){
     const row = ev.target.closest('.visit-item');
     const index = parseInt(row.dataset.vidx, 10);
-    if(LIVE_EDITS[account] && LIVE_EDITS[account].visits) LIVE_EDITS[account].visits.splice(index,1);
-    postState({action:'deleteVisit', account, index});
+    const childRow = ev.target.closest('.child-row');
+    const key = childRow ? childRow.dataset.childkey : account;
+    if(LIVE_EDITS[key] && LIVE_EDITS[key].visits) LIVE_EDITS[key].visits.splice(index,1);
+    postState({action:'deleteVisit', account:key, index});
     return;
   }
   if(ev.target.closest('.js-delete-account')){
@@ -468,25 +605,29 @@ document.getElementById('na-save').addEventListener('click', async ()=>{
   const buyer = document.getElementById('na-buyer').value.trim();
   const potential = document.getElementById('na-potential').value.trim();
   const notes = document.getElementById('na-notes').value.trim();
+  const saveBtn = document.getElementById('na-save');
+  errEl.textContent='Saving...';
+  saveBtn.disabled = true;
+  const r = await apiFetch({method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action:'addAccount', name, loc, buyer, potential, notes})});
+  saveBtn.disabled = false;
+  if(!r.ok){
+    errEl.textContent = r.network
+      ? ('Not saved — '+r.error+'. Your entry is still here; check your connection and press Save again.')
+      : ('Not saved — '+r.error);
+    return;
+  }
   errEl.textContent='';
-  try{
-    const res = await fetch(API, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action:'addAccount', name, loc, buyer, potential, notes})});
-    const j = await res.json();
-    if(!res.ok){ errEl.textContent = j.error || 'Could not save account'; return; }
-    REVIEWS = j.reviews || REVIEWS;
-    LIVE_EDITS = j.edits || LIVE_EDITS;
-    CUSTOM_ACCOUNTS = j.customAccounts || CUSTOM_ACCOUNTS;
-    localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS));
-    nameEl.value=''; document.getElementById('na-loc').value='';
-    document.getElementById('na-buyer').value=''; document.getElementById('na-potential').value='';
-    document.getElementById('na-notes').value='';
-    document.getElementById('add-account-panel').style.display='none';
-    document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
-    document.querySelector('.chip[data-f="all"]').classList.add('active');
-    document.getElementById('search').value = name;
-    shownCount = 50;
-    render();
-  }catch(e){ errEl.textContent = 'Network error — try again'; }
+  applyState(r.data);
+  nameEl.value=''; document.getElementById('na-loc').value='';
+  document.getElementById('na-buyer').value=''; document.getElementById('na-potential').value='';
+  document.getElementById('na-notes').value='';
+  document.getElementById('add-account-panel').style.display='none';
+  document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));
+  document.querySelector('.chip[data-f="all"]').classList.add('active');
+  document.getElementById('search').value = name;
+  shownCount = 50;
+  setSync('Synced — changes save automatically across your devices.', 'ok');
+  render();
 });
 
 document.querySelectorAll('.chip').forEach(b=>b.addEventListener('click',()=>{
