@@ -13,9 +13,23 @@ type CustomAccount = {
   addedAt: string;
 };
 
+type AccountFields = {
+  n?: string;
+  loc?: string;
+  buyer?: string;
+  potential?: string;
+};
+
 type State = {
   reviews: Record<string, "accept" | "reject">;
-  edits: Record<string, { notes?: string; visits?: { date: string; who?: string; note?: string }[] }>;
+  edits: Record<
+    string,
+    {
+      notes?: string;
+      visits?: { date: string; who?: string; note?: string }[];
+      fields?: AccountFields;
+    }
+  >;
   customAccounts: CustomAccount[];
 };
 
@@ -96,6 +110,24 @@ export default async (req: Request, context: Context) => {
       if (notes && String(notes).trim()) {
         current.edits[trimmedName] = current.edits[trimmedName] || {};
         current.edits[trimmedName].notes = String(notes).trim();
+      }
+    } else if (action === "setFields") {
+      const { account, fields } = body;
+      if (!account) return new Response(JSON.stringify({ error: "Missing account" }), { status: 400 });
+      current.edits[account] = current.edits[account] || {};
+      if (fields === null) {
+        delete current.edits[account].fields;
+      } else {
+        const name = typeof fields?.n === "string" ? fields.n.trim() : "";
+        if (!name) {
+          return new Response(JSON.stringify({ error: "Account name cannot be blank" }), { status: 400 });
+        }
+        current.edits[account].fields = {
+          n: name,
+          loc: typeof fields.loc === "string" ? fields.loc.trim() : "",
+          buyer: typeof fields.buyer === "string" ? fields.buyer.trim() : "",
+          potential: typeof fields.potential === "string" ? fields.potential.trim() : "",
+        };
       }
     } else if (action === "deleteAccount") {
       const { id } = body;
