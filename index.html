@@ -99,6 +99,7 @@ button.small-action{font-size:12px;padding:6px 10px}
 <h1>Dealer CRM &mdash; consolidated view</h1>
 <p class="sub">AAmerica, Rizzy, Dovetail, and Huntington House YTD sales merged with your master dealer list. Sales data generated August 01, 2026 &mdash; re-run build_dealer_crm.py when new sales files come in. Visits, notes, and match decisions you add below are saved live and sync across every device.</p>
 <p class="sync-status" id="sync-status">Connecting...</p>
+<button class="linkbtn" id="sync-retry" style="display:none;margin:0 0 12px">Retry connection</button>
 
 <div class="metrics">
   <div class="metric"><div class="label">Total accounts</div><div class="value" id="m-total">-</div></div>
@@ -175,17 +176,22 @@ function setSync(msg, cls){
   if(!el) return;
   el.textContent = msg;
   el.className = 'sync-status ' + cls;
+  const btn = document.getElementById('sync-retry');
+  if(btn) btn.style.display = (cls === 'err') ? 'inline-block' : 'none';
 }
 
 // Calls the backend with a timeout and one automatic retry.
 // Returns {ok, data, error} — never throws.
+// Waits are generous on purpose: after a redeploy the serverless function
+// has to cold-start, which can take 20s+ on the first request.
+const RETRY_WAITS = [1500, 4000, 8000];
 async function apiFetch(opts, tries){
-  tries = tries || 2;
+  tries = tries || 4;
   let lastErr = null;
   for(let attempt=0; attempt<tries; attempt++){
     try{
       const ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(()=>ctrl.abort(), 15000) : null;
+      const timer = ctrl ? setTimeout(()=>ctrl.abort(), 30000) : null;
       let res, txt;
       try{
         const o = Object.assign({}, opts);
@@ -206,7 +212,10 @@ async function apiFetch(opts, tries){
       return {ok:true, data:data};
     }catch(e){
       lastErr = e;
-      if(attempt < tries-1) await new Promise(r=>setTimeout(r, 800));
+      if(attempt < tries-1){
+        if(attempt===0) setSync('Waking up the server, one moment...', '');
+        await new Promise(r=>setTimeout(r, RETRY_WAITS[attempt] || 8000));
+      }
     }
   }
   const timedOut = lastErr && (lastErr.name === 'AbortError');
@@ -222,7 +231,7 @@ function applyState(d){
 }
 
 async function loadLiveState(){
-  const r = await apiFetch({}, 2);
+  const r = await apiFetch({});
   if(r.ok){
     REVIEWS = (r.data && r.data.reviews) || {};
     LIVE_EDITS = (r.data && r.data.edits) || {};
@@ -230,7 +239,7 @@ async function loadLiveState(){
     try{ localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS)); }catch(e){}
     setSync('Synced — changes save automatically across your devices.', 'ok');
   }else{
-    setSync('Could not reach the live backend ('+r.error+') — showing your last synced copy. Changes will NOT save until this clears. Reload the page to retry.', 'err');
+    setSync('Could not reach the live backend ('+r.error+') — showing your last synced copy. Changes will NOT save until this clears. This is usually temporary just after an update; press Retry connection below.', 'err');
   }
   render();
 }
@@ -586,6 +595,14 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
     postState({action:'deleteAccount', id: a.customId});
     return;
   }
+});
+
+document.getElementById('sync-retry').addEventListener('click', async ()=>{
+  const btn = document.getElementById('sync-retry');
+  btn.disabled = true;
+  setSync('Reconnecting...', '');
+  await loadLiveState();
+  btn.disabled = false;
 });
 
 document.getElementById('add-account-btn').addEventListener('click', ()=>{
