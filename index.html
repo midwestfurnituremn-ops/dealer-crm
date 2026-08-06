@@ -20,6 +20,7 @@ h1{font-size:20px;font-weight:600;margin:0 0 4px}
 .sync-status{font-size:12px;color:var(--text-muted);margin:0 0 12px}
 .sync-status.ok{color:var(--success)}
 .sync-status.err{color:var(--danger)}
+.sync-status.warn{color:var(--warning);font-weight:500}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}
 .metric{background:var(--card);border:0.5px solid var(--border);border-radius:12px;padding:12px 16px}
 .metric .label{font-size:12px;color:var(--text-secondary)}
@@ -187,7 +188,136 @@ function setSync(msg, cls){
   el.textContent = msg;
   el.className = 'sync-status ' + cls;
   const btn = document.getElementById('sync-retry');
-  if(btn) btn.style.display = (cls === 'err') ? 'inline-block' : 'none';
+  if(btn){
+    const show = (cls === 'err' || cls === 'warn');
+    btn.style.display = show ? 'inline-block' : 'none';
+    btn.textContent = (cls === 'warn') ? 'Sync now' : 'Retry connection';
+  }
+}
+
+// ---------------------------------------------------------------
+// Offline save queue.
+// Any change that can't reach the server is stored on this device
+// and retried automatically until it lands, so nothing entered on
+// the road is ever lost.
+// ---------------------------------------------------------------
+const QUEUE_KEY = 'dealerCRM_queue';
+const STATE_CACHE_KEY = 'dealerCRM_state';
+let QUEUE = [];
+
+function loadQueue(){
+  try{ QUEUE = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); }catch(e){ QUEUE = []; }
+  if(!Array.isArray(QUEUE)) QUEUE = [];
+}
+function saveQueue(){
+  try{ localStorage.setItem(QUEUE_KEY, JSON.stringify(QUEUE)); }catch(e){}
+}
+function enqueue(body){
+  QUEUE.push({ts: Date.now(), body: body});
+  saveQueue();
+}
+function cacheState(){
+  try{
+    localStorage.setItem(STATE_CACHE_KEY, JSON.stringify({reviews:REVIEWS, edits:LIVE_EDITS, customAccounts:CUSTOM_ACCOUNTS}));
+  }catch(e){}
+}
+function loadCachedState(){
+  try{
+    const c = JSON.parse(localStorage.getItem(STATE_CACHE_KEY) || 'null');
+    if(c){
+      REVIEWS = c.reviews || {};
+      LIVE_EDITS = c.edits || {};
+      CUSTOM_ACCOUNTS = c.customAccounts || [];
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+
+function ensureEdit(k){ LIVE_EDITS[k] = LIVE_EDITS[k] || {}; return LIVE_EDITS[k]; }
+
+// Applies a change to the local view exactly the way the server would,
+// so pending edits stay visible before they've synced.
+function applyOpLocally(b){
+  if(!b || !b.action) return;
+  if(b.action === 'setReview'){
+    if(b.value === null) delete REVIEWS[b.key]; else REVIEWS[b.key] = b.value;
+  }else if(b.action === 'setNotes'){
+    ensureEdit(b.account).notes = b.notes || '';
+  }else if(b.action === 'addVisit'){
+    const e = ensureEdit(b.account);
+    e.visits = e.visits || [];
+    e.visits.unshift({date:b.date, who:b.who||'', note:b.note||''});
+  }else if(b.action === 'deleteVisit'){
+    const e = LIVE_EDITS[b.account];
+    if(e && e.visits) e.visits.splice(b.index, 1);
+  }else if(b.action === 'setFields'){
+    const e = ensureEdit(b.account);
+    if(b.fields === null) delete e.fields; else e.fields = b.fields;
+  }else if(b.action === 'setContacts'){
+    const e = ensureEdit(b.account);
+    if(b.contacts === null) delete e.contacts; else e.contacts = b.contacts;
+  }else if(b.action === 'addAccount'){
+    const nm = (b.name||'').trim();
+    if(!nm) return;
+    if(!CUSTOM_ACCOUNTS.some(c=>(c.n||'').toLowerCase() === nm.toLowerCase())){
+      CUSTOM_ACCOUNTS.push({id:'pending-'+nm.toLowerCase(), n:nm, loc:b.loc||'', buyer:b.buyer||'',
+                            potential:b.potential||'', addedAt:new Date().toISOString()});
+    }
+    if(b.notes && String(b.notes).trim()) ensureEdit(nm).notes = String(b.notes).trim();
+  }else if(b.action === 'deleteAccount'){
+    CUSTOM_ACCOUNTS = CUSTOM_ACCOUNTS.filter(c=>c.id !== b.id);
+  }
+}
+function replayQueue(){ QUEUE.forEach(item=>applyOpLocally(item.body)); }
+
+function pendingAgeText(){
+  if(!QUEUE.length) return '';
+  let oldest = QUEUE[0].ts;
+  QUEUE.forEach(q=>{ if(q.ts < oldest) oldest = q.ts; });
+  const mins = Math.floor((Date.now()-oldest)/60000);
+  if(mins < 1) return 'just now';
+  if(mins < 60) return mins + (mins===1?' minute ago':' minutes ago');
+  const hrs = Math.floor(mins/60);
+  if(hrs < 24) return hrs + (hrs===1?' hour ago':' hours ago');
+  const days = Math.floor(hrs/24);
+  return days === 1 ? 'yesterday' : days + ' days ago';
+}
+function updateSyncUI(){
+  if(QUEUE.length){
+    const n = QUEUE.length;
+    setSync(n + (n===1?' change':' changes') + ' saved on this device, waiting to sync (oldest ' +
+            pendingAgeText() + '). This retries on its own — make sure it clears before entering more on another device.', 'warn');
+    return true;
+  }
+  return false;
+}
+
+let flushing = false;
+async function flushQueue(){
+  if(flushing || !QUEUE.length) return;
+  flushing = true;
+  try{
+    while(QUEUE.length){
+      const item = QUEUE[0];
+      const r = await apiFetch({method:'POST', headers:{'content-type':'application/json'},
+                                body: JSON.stringify(item.body)}, 2);
+      if(r.ok){
+        QUEUE.shift(); saveQueue();
+        applyState(r.data);
+      }else if(r.network){
+        break;                     // still offline - keep everything queued
+      }else{
+        QUEUE.shift(); saveQueue(); // server refused it permanently; drop so it can't jam the queue
+      }
+    }
+  } finally {
+    flushing = false;
+  }
+  replayQueue();
+  cacheState();
+  if(!updateSyncUI()) setSync('Synced — changes save automatically across your devices.', 'ok');
+  render();
 }
 
 // Calls the backend with a timeout and one automatic retry.
@@ -247,20 +377,46 @@ async function loadLiveState(){
     LIVE_EDITS = (r.data && r.data.edits) || {};
     CUSTOM_ACCOUNTS = (r.data && r.data.customAccounts) || [];
     try{ localStorage.setItem('dealerCRM_reviews', JSON.stringify(REVIEWS)); }catch(e){}
-    setSync('Synced — changes save automatically across your devices.', 'ok');
+    replayQueue();
+    cacheState();
+    if(!updateSyncUI()) setSync('Synced — changes save automatically across your devices.', 'ok');
+    render();
+    flushQueue();
+    return;
+  }
+  loadCachedState();
+  replayQueue();
+  if(QUEUE.length){
+    updateSyncUI();
   }else{
-    setSync('Could not reach the live backend ('+r.error+') — showing your last synced copy. Changes will NOT save until this clears. This is usually temporary just after an update; press Retry connection below.', 'err');
+    setSync('Could not reach the live backend ('+r.error+') — showing your last synced copy. Anything you enter now is stored on this device and sent once the connection returns.', 'err');
   }
   render();
 }
 
 async function postState(body){
+  applyOpLocally(body);
+  // Preserve order: if something is already waiting, this goes behind it.
+  if(QUEUE.length){
+    enqueue(body);
+    cacheState();
+    updateSyncUI();
+    render();
+    flushQueue();
+    return {ok:false, queued:true};
+  }
   const r = await apiFetch({method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
   if(r.ok){
     applyState(r.data);
+    replayQueue();
+    cacheState();
     setSync('Synced — changes save automatically across your devices.', 'ok');
+  }else if(r.network){
+    enqueue(body);
+    cacheState();
+    updateSyncUI();
   }else{
-    setSync('That last change did NOT save — '+r.error+'. What you see on screen is not stored yet. Reload the page to see what is actually saved, then re-enter it.', 'err');
+    setSync('That change was refused by the server — '+r.error+'. It has not been saved.', 'err');
   }
   render();
   return r;
@@ -311,8 +467,6 @@ function effectiveContacts(a){
 }
 function contactsAreLive(a){ return Array.isArray(liveEdit(a).contacts); }
 function saveContacts(account, list){
-  LIVE_EDITS[account] = LIVE_EDITS[account] || {};
-  LIVE_EDITS[account].contacts = list;
   return postState({action:'setContacts', account, contacts:list});
 }
 function pick(f, key, fallback){ return (f && f[key]!==undefined && f[key]!==null) ? f[key] : (fallback || ''); }
@@ -573,7 +727,6 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
     const badge = ev.target.closest('[data-key]');
     const key = badge.dataset.key;
     const value = acceptBtn ? 'accept' : rejectBtn ? 'reject' : null;
-    if(value===null) delete REVIEWS[key]; else REVIEWS[key]=value;
     postState({action:'setReview', key, value});
     return;
   }
@@ -649,13 +802,10 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
       buyer: form.querySelector('.js-ed-buyer').value.trim(),
       potential: form.querySelector('.js-ed-potential').value.trim()
     };
-    LIVE_EDITS[account] = LIVE_EDITS[account] || {};
-    LIVE_EDITS[account].fields = fields;
     postState({action:'setFields', account, fields});
     return;
   }
   if(ev.target.closest('.js-ed-reset')){
-    if(LIVE_EDITS[account]) delete LIVE_EDITS[account].fields;
     postState({action:'setFields', account, fields:null});
     return;
   }
@@ -675,8 +825,6 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
   }
   if(ev.target.closest('.js-save-notes')){
     const notes = card.querySelector('.js-notes-input').value;
-    LIVE_EDITS[account] = LIVE_EDITS[account] || {};
-    LIVE_EDITS[account].notes = notes;
     postState({action:'setNotes', account, notes});
     return;
   }
@@ -695,9 +843,6 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
     const date = scope.querySelector('.js-visit-date').value || todayISO();
     const who = scope.querySelector('.js-visit-who').value;
     const note = scope.querySelector('.js-visit-note').value;
-    LIVE_EDITS[key] = LIVE_EDITS[key] || {};
-    LIVE_EDITS[key].visits = LIVE_EDITS[key].visits || [];
-    LIVE_EDITS[key].visits.unshift({date, who, note});
     postState({action:'addVisit', account:key, date, who, note});
     return;
   }
@@ -706,13 +851,11 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
     const index = parseInt(row.dataset.vidx, 10);
     const childRow = ev.target.closest('.child-row');
     const key = childRow ? childRow.dataset.childkey : account;
-    if(LIVE_EDITS[key] && LIVE_EDITS[key].visits) LIVE_EDITS[key].visits.splice(index,1);
     postState({action:'deleteVisit', account:key, index});
     return;
   }
   if(ev.target.closest('.js-delete-account')){
     if(!confirm(`Remove "${account}" from the dashboard? This cannot be undone.`)) return;
-    CUSTOM_ACCOUNTS = CUSTOM_ACCOUNTS.filter(c=>c.id!==a.customId);
     postState({action:'deleteAccount', id: a.customId});
     return;
   }
@@ -721,10 +864,20 @@ document.getElementById('cards').addEventListener('click', (ev)=>{
 document.getElementById('sync-retry').addEventListener('click', async ()=>{
   const btn = document.getElementById('sync-retry');
   btn.disabled = true;
-  setSync('Reconnecting...', '');
-  await loadLiveState();
+  setSync(QUEUE.length ? 'Syncing your saved changes...' : 'Reconnecting...', '');
+  if(QUEUE.length) await flushQueue(); else await loadLiveState();
   btn.disabled = false;
 });
+
+// Keep trying to drain anything queued: when the network returns, when the
+// tab is brought back to the front, and on a slow timer in the background.
+if(typeof window !== 'undefined' && window.addEventListener){
+  window.addEventListener('online', ()=>{ flushQueue(); });
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible') flushQueue();
+  });
+  setInterval(()=>{ if(QUEUE.length) flushQueue(); }, 60000);
+}
 
 document.getElementById('add-account-btn').addEventListener('click', ()=>{
   const panel = document.getElementById('add-account-panel');
@@ -744,18 +897,16 @@ document.getElementById('na-save').addEventListener('click', async ()=>{
   const potential = document.getElementById('na-potential').value.trim();
   const notes = document.getElementById('na-notes').value.trim();
   const saveBtn = document.getElementById('na-save');
+  const body = {action:'addAccount', name, loc, buyer, potential, notes};
   errEl.textContent='Saving...';
   saveBtn.disabled = true;
-  const r = await apiFetch({method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({action:'addAccount', name, loc, buyer, potential, notes})});
+  const r = await postState(body);
   saveBtn.disabled = false;
-  if(!r.ok){
-    errEl.textContent = r.network
-      ? ('Not saved — '+r.error+'. Your entry is still here; check your connection and press Save again.')
-      : ('Not saved — '+r.error);
+  if(!r.ok && !r.queued && !r.network){
+    errEl.textContent = 'Not saved — '+r.error;
     return;
   }
   errEl.textContent='';
-  applyState(r.data);
   nameEl.value=''; document.getElementById('na-loc').value='';
   document.getElementById('na-buyer').value=''; document.getElementById('na-potential').value='';
   document.getElementById('na-notes').value='';
@@ -764,7 +915,6 @@ document.getElementById('na-save').addEventListener('click', async ()=>{
   document.querySelector('.chip[data-f="all"]').classList.add('active');
   document.getElementById('search').value = name;
   shownCount = 50;
-  setSync('Synced — changes save automatically across your devices.', 'ok');
   render();
 });
 
@@ -790,8 +940,12 @@ function renderUnmatched(){
   }
 }
 
+loadQueue();
+loadCachedState();
+replayQueue();
 render();
 renderUnmatched();
+updateSyncUI();
 loadLiveState();
 </script>
 </body>
