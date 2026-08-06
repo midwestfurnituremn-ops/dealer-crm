@@ -20,6 +20,12 @@ type AccountFields = {
   potential?: string;
 };
 
+type Contact = {
+  name?: string;
+  role?: string;
+  email?: string;
+};
+
 type State = {
   reviews: Record<string, "accept" | "reject">;
   edits: Record<
@@ -28,6 +34,7 @@ type State = {
       notes?: string;
       visits?: { date: string; who?: string; note?: string }[];
       fields?: AccountFields;
+      contacts?: Contact[];
     }
   >;
   customAccounts: CustomAccount[];
@@ -128,6 +135,26 @@ export default async (req: Request, context: Context) => {
           buyer: typeof fields.buyer === "string" ? fields.buyer.trim() : "",
           potential: typeof fields.potential === "string" ? fields.potential.trim() : "",
         };
+      }
+    } else if (action === "setContacts") {
+      const { account, contacts } = body;
+      if (!account) return new Response(JSON.stringify({ error: "Missing account" }), { status: 400 });
+      current.edits[account] = current.edits[account] || {};
+      if (contacts === null) {
+        delete current.edits[account].contacts;
+      } else {
+        if (!Array.isArray(contacts)) {
+          return new Response(JSON.stringify({ error: "Contacts must be a list" }), { status: 400 });
+        }
+        const cleaned: Contact[] = [];
+        for (const c of contacts) {
+          const name = typeof c?.name === "string" ? c.name.trim() : "";
+          const role = typeof c?.role === "string" ? c.role.trim() : "";
+          const email = typeof c?.email === "string" ? c.email.trim() : "";
+          if (!name && !role && !email) continue;
+          cleaned.push({ name, role, email });
+        }
+        current.edits[account].contacts = cleaned;
       }
     } else if (action === "deleteAccount") {
       const { id } = body;
